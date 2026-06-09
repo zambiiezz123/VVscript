@@ -502,13 +502,14 @@ end))
 -- candidates. The 5.00s / 8.53s looping IDs were excluded (idle/walk loops),
 -- as were the sub-0.3s effect stubs. Prune anything that false-triggers.
 local ATTACK_ANIMS = {
-    -- Mob attacks
+    -- Scorpion Hollow attacks
     ['rbxassetid://17188146433'] = true,  -- 1.60s (fires often = likely M1)
-    ['rbxassetid://17188155225'] = true,  -- 3.13s
-    ['rbxassetid://17188289743'] = true,  -- 2.97s
-    ['rbxassetid://17188670401'] = true,  -- 2.07s
     ['rbxassetid://17188382622'] = true,  -- 1.83s
     ['rbxassetid://17188386684'] = true,  -- 1.95s
+    ['rbxassetid://17188670401'] = true,  -- 2.07s
+    ['rbxassetid://17188289743'] = true,  -- 2.97s
+    ['rbxassetid://18989204838'] = true,  -- 3.00s
+    ['rbxassetid://17188155225'] = true,  -- 3.13s
 
     -- Player (WOLF_ELECTRO) attacks
     ['rbxassetid://18998838518'] = true,  -- 1.75s
