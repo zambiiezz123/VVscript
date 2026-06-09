@@ -1,0 +1,711 @@
+--[[
+    Game test menu — built on LinoriaLib
+    Run this single script while loaded into your game.
+
+    Movement : WalkSpeed, Fly, Noclip, Infinite Jump, Jump Power
+    World    : No Fall Damage, No Fog
+    Each movement feature has a checkbox + (most) a keybind synced to it.
+]]
+
+-- 0. Unload any previous instance FIRST ---------------------------------------
+-- Re-injecting without this leaves the old script's loops running against a
+-- stale Toggles/Options table -> "attempt to index nil with 'Value'" spam.
+if getgenv().GameTestMenu_Unload then
+    pcall(getgenv().GameTestMenu_Unload)
+    task.wait(0.1)
+end
+
+-- 1. Load the library + addons -------------------------------------------------
+local repo = 'https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/'
+
+local Library      = loadstring(game:HttpGet(repo .. 'Library.lua'))()
+local ThemeManager = loadstring(game:HttpGet(repo .. 'addons/ThemeManager.lua'))()
+local SaveManager  = loadstring(game:HttpGet(repo .. 'addons/SaveManager.lua'))()
+
+-- Expose an unload hook so the NEXT injection can clean us up.
+getgenv().GameTestMenu_Unload = function() Library:Unload() end
+
+-- 2. Services / locals ---------------------------------------------------------
+local Players    = game:GetService('Players')
+local RunService = game:GetService('RunService')
+local UIS        = game:GetService('UserInputService')
+local Lighting   = game:GetService('Lighting')
+local RepStorage = game:GetService('ReplicatedStorage')
+local Teleport   = game:GetService('TeleportService')
+local HttpServ   = game:GetService('HttpService')
+
+local LocalPlayer = Players.LocalPlayer
+local Camera      = workspace.CurrentCamera
+
+-- Track everything we connect so we can cleanly disconnect on unload.
+local Connections = {}
+local function track(conn) table.insert(Connections, conn); return conn end
+
+-- Fresh character accessors (survive respawns) --------------------------------
+local function getChar() return LocalPlayer.Character end
+local function getHumanoid()
+    local c = getChar()
+    return c and c:FindFirstChildOfClass('Humanoid')
+end
+local function getRoot()
+    local c = getChar()
+    return c and c:FindFirstChild('HumanoidRootPart')
+end
+
+-- 3. Window / tabs -------------------------------------------------------------
+local Window = Library:CreateWindow({
+    Title = 'Game Test Menu',
+    Center = true,
+    AutoShow = true,
+    TabPadding = 8,
+    MenuFadeTime = 0.2,
+})
+
+local Tabs = {
+    Main = Window:AddTab('Main'),
+    Combat = Window:AddTab('Combat'),
+    ['UI Settings'] = Window:AddTab('UI Settings'),
+}
+
+local MoveBox  = Tabs.Main:AddLeftGroupbox('Movement')
+local WorldBox = Tabs.Main:AddRightGroupbox('World')
+
+-- ============================================================================
+-- 4. UI ELEMENTS (built first, logic wired later)
+-- ============================================================================
+
+-- WalkSpeed: keybind chained onto the toggle so SyncToggleState works.
+MoveBox:AddToggle('WalkSpeedEnabled', {
+    Text = 'WalkSpeed',
+    Default = false,
+    Tooltip = 'Override WalkSpeed with the slider value',
+}):AddKeyPicker('WalkSpeedKey', {
+    Default = 'F', SyncToggleState = true, Mode = 'Toggle', Text = 'WalkSpeed',
+})
+MoveBox:AddSlider('WalkSpeedValue', {
+    Text = 'WalkSpeed', Default = 50, Min = 16, Max = 200, Rounding = 0, Suffix = ' studs/s',
+})
+
+-- Fly
+MoveBox:AddToggle('FlyEnabled', {
+    Text = 'Fly',
+    Default = false,
+    Tooltip = 'WASD to move, Space/Ctrl for up/down',
+}):AddKeyPicker('FlyKey', {
+    Default = 'G', SyncToggleState = true, Mode = 'Toggle', Text = 'Fly',
+})
+MoveBox:AddSlider('FlySpeed', {
+    Text = 'Fly speed', Default = 60, Min = 10, Max = 200, Rounding = 0, Suffix = ' studs/s',
+})
+
+-- Noclip
+MoveBox:AddToggle('NoclipEnabled', {
+    Text = 'Noclip',
+    Default = false,
+    Tooltip = 'Walk through parts',
+}):AddKeyPicker('NoclipKey', {
+    Default = 'N', SyncToggleState = true, Mode = 'Toggle', Text = 'Noclip',
+})
+
+-- Infinite Jump
+MoveBox:AddToggle('InfJumpEnabled', {
+    Text = 'Infinite Jump',
+    Default = false,
+}):AddKeyPicker('InfJumpKey', {
+    Default = 'J', SyncToggleState = true, Mode = 'Toggle', Text = 'Infinite Jump',
+})
+
+-- Jump Power
+MoveBox:AddToggle('JumpPowerEnabled', {
+    Text = 'Jump Power',
+    Default = false,
+})
+MoveBox:AddSlider('JumpPowerValue', {
+    Text = 'Jump power', Default = 50, Min = 50, Max = 500, Rounding = 0,
+})
+
+-- World features
+WorldBox:AddToggle('NoFallDamage', {
+    Text = 'No Fall Damage',
+    Default = false,
+    Tooltip = 'Blocks the client-sided TakeDamage remote (fall damage). Poison is server-side and unaffected.',
+})
+WorldBox:AddToggle('NoFog', {
+    Text = 'No Fog',
+    Default = false,
+    Tooltip = 'Removes Lighting fog + atmosphere density',
+})
+
+-- AA gun = server-side anti-cheat that kills you for staying airborne too long.
+-- No remote fires, so it can't be blocked. This just times how long you've been
+-- airborne and learns the lethal threshold from when it actually kills you.
+local AABox = Tabs.Main:AddRightGroupbox('Anti-Cheat (AA Gun)')
+AABox:AddLabel('Server kills you for prolonged flight.\nCannot be blocked - this only warns you.', true)
+local AATimerLabel = AABox:AddLabel('Airborne: idle')
+AABox:AddSlider('AAThreshold', {
+    Text = 'Est. AA time', Default = 12, Min = 3, Max = 60, Rounding = 1, Suffix = ' s',
+    Tooltip = 'Your guess at the lethal airborne time. Calibrate it from death notifications.',
+})
+AABox:AddToggle('AAAutoDisableFly', {
+    Text = 'Auto-disable fly before AA',
+    Default = true,
+    Tooltip = 'Cuts fly ~1s before the estimated AA time so you drop and reset the timer',
+})
+
+-- Server hop ------------------------------------------------------------------
+local serverHop, rejoinServer, clearVisited -- forward-declared for the buttons
+
+local ServerBox = Tabs.Main:AddRightGroupbox('Server')
+local ServerLabel = ServerBox:AddLabel('Visited: 0 servers')
+ServerBox:AddButton({
+    Text = 'Server Hop (lowest pop)',
+    Func = function() if serverHop then serverHop() end end,
+    Tooltip = 'Find the least-populated joinable server (skips ones you already hopped to)',
+})
+ServerBox:AddButton({
+    Text = 'Rejoin',
+    Func = function() if rejoinServer then rejoinServer() end end,
+})
+ServerBox:AddButton({
+    Text = 'Clear visited list',
+    Func = function() if clearVisited then clearVisited() end end,
+    Tooltip = 'Forget the blocklist of servers you have already joined',
+})
+
+-- Combat tab ------------------------------------------------------------------
+local doParry -- forward-declared so the Test Parry button can call it
+
+local ParryBox = Tabs.Combat:AddLeftGroupbox('Auto Parry')
+ParryBox:AddToggle('AutoParry', {
+    Text = 'Auto Parry',
+    Default = false,
+    Tooltip = 'Fires the parry remote when a logged attack animation plays nearby',
+})
+ParryBox:AddToggle('AutoEquip', {
+    Text = 'Auto-equip on enable',
+    Default = true,
+    Tooltip = 'Pull your weapon out once when Auto Parry is switched on',
+})
+ParryBox:AddToggle('ParryIgnorePlayers', {
+    Text = 'Ignore player anims',
+    Default = false,
+    Tooltip = 'Only auto-parry mob attacks, never other players (PvE only)',
+})
+ParryBox:AddSlider('ParryDistance', {
+    Text = 'Parry range', Default = 30, Min = 5, Max = 120, Rounding = 0, Suffix = ' studs',
+})
+ParryBox:AddSlider('ParryReactionDelay', {
+    Text = 'React delay', Default = 0, Min = 0, Max = 0.6, Rounding = 2, Suffix = ' s',
+    Tooltip = 'Wait this long after an attack anim before parrying (tune to game timing)',
+})
+ParryBox:AddSlider('ParryCooldown', {
+    Text = 'Cooldown', Default = 0.4, Min = 0, Max = 3, Rounding = 2, Suffix = ' s',
+})
+ParryBox:AddDropdown('ParryMethod', {
+    Values = { 'Mouse2 (block/parry)', 'RedCounter (blade catch)' },
+    Default = 1,
+    Multi = false,
+    Text = 'Parry method',
+    Tooltip = 'Which remote Auto Parry / Test Parry fires',
+})
+ParryBox:AddButton({
+    Text = 'Test Parry',
+    Func = function() if doParry then doParry() end end,
+    Tooltip = 'Fire the parry remote once to confirm it works',
+})
+ParryBox:AddButton({
+    Text = 'Toggle Weapon',
+    Func = function()
+        local c = RepStorage:FindFirstChild('Requests')
+        local r = c and c:FindFirstChild('Combat')
+        if r then r:FireServer('ToggleWeapon') end
+    end,
+    Tooltip = 'Manually equip/unequip your weapon',
+})
+
+local LogBox = Tabs.Combat:AddRightGroupbox('Animation Logger')
+LogBox:AddLabel('Logs animations played by nearby\nmobs/players to the console (F9).', true)
+LogBox:AddToggle('LogAnims', { Text = 'Log Animations', Default = false })
+LogBox:AddToggle('LogAnimsPlayersOnly', {
+    Text = 'Players only (ignore mobs)', Default = false,
+})
+LogBox:AddToggle('LogAnimsHideLooped', {
+    Text = 'Hide looped (idle) anims', Default = true,
+    Tooltip = 'Idles loop, attacks do not - hides the 5s/8s idle spam',
+})
+LogBox:AddSlider('LogAnimsRange', {
+    Text = 'Log range', Default = 80, Min = 10, Max = 300, Rounding = 0, Suffix = ' studs',
+})
+
+-- ============================================================================
+-- 5. LOGIC
+-- ============================================================================
+
+-- ---- Remote block hook (client-sided damage) --------------------------------
+-- VV computes fall damage on the client and fires Requests.TakeDamage(amount)
+-- to apply it. Dropping that call = no fall damage. If poison uses the same
+-- remote, this blocks it too.
+local MenuUnloaded = false
+do
+    local hookmetamethod   = hookmetamethod
+    local getnamecallmethod = getnamecallmethod
+    local newcclosure      = newcclosure or function(f) return f end
+    local checkcaller      = checkcaller or function() return false end
+
+    if hookmetamethod and getnamecallmethod then
+        local oldNamecall
+        oldNamecall = hookmetamethod(game, '__namecall', newcclosure(function(self, ...)
+            if not MenuUnloaded and not checkcaller() and typeof(self) == 'Instance' then
+                if getnamecallmethod() == 'FireServer' and self.ClassName == 'RemoteEvent'
+                   and self.Name == 'TakeDamage'
+                   and Toggles.NoFallDamage and Toggles.NoFallDamage.Value then
+                    return -- drop the self-damage report; server never gets told
+                end
+            end
+            return oldNamecall(self, ...)
+        end))
+    else
+        Library:Notify('Executor lacks hookmetamethod - No Fall Damage will not work', 6)
+    end
+end
+
+-- ---- Server hop -------------------------------------------------------------
+-- Scans all public VV servers, joins the lowest-population joinable one, and
+-- remembers servers already joined (persisted to file) so it never loops back.
+do
+    local placeId    = game.PlaceId
+    local currentJob = game.JobId
+    local FOLDER     = 'GameTestMenu'
+    local VISITED    = FOLDER .. '/visited_servers.json'
+
+    local visited = {}
+    pcall(function()
+        if isfile and isfile(VISITED) then
+            visited = HttpServ:JSONDecode(readfile(VISITED)) or {}
+        end
+    end)
+    visited[currentJob] = true -- never pick the server we're already in
+
+    local function saveVisited()
+        pcall(function()
+            if makefolder and isfolder and not isfolder(FOLDER) then makefolder(FOLDER) end
+            if writefile then writefile(VISITED, HttpServ:JSONEncode(visited)) end
+        end)
+    end
+
+    local function visitedCount()
+        local n = 0
+        for _ in pairs(visited) do n += 1 end
+        return n
+    end
+    ServerLabel:SetText(('Visited: %d servers'):format(visitedCount() - 1))
+
+    local function httpGet(url)
+        local ok, res = pcall(function() return game:HttpGetAsync(url) end)
+        if ok and res then return res end
+        local req = (syn and syn.request) or http_request or request
+        if req then
+            local ok2, resp = pcall(req, { Url = url, Method = 'GET' })
+            if ok2 and resp and resp.Body then return resp.Body end
+        end
+        return nil
+    end
+
+    serverHop = function()
+        Library:Notify('Searching for lowest-population server...', 3)
+        local best, bestPlayers, cursor, pages = nil, nil, nil, 0
+        repeat
+            pages += 1
+            local url = ('https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100'):format(placeId)
+            if cursor then url = url .. '&cursor=' .. cursor end
+            local body = httpGet(url)
+            if not body then Library:Notify('Server hop: HTTP request failed', 5); return end
+            local ok, data = pcall(function() return HttpServ:JSONDecode(body) end)
+            if not ok or not data then Library:Notify('Server hop: bad response', 5); return end
+            for _, s in ipairs(data.data or {}) do
+                if s.id ~= currentJob and not visited[s.id]
+                   and s.playing and s.maxPlayers and s.playing < s.maxPlayers then
+                    if not bestPlayers or s.playing < bestPlayers then
+                        best, bestPlayers = s.id, s.playing
+                    end
+                end
+            end
+            cursor = data.nextPageCursor
+        until not cursor or pages >= 12
+
+        if not best then
+            Library:Notify('No new joinable server found. Try Clear visited list.', 6)
+            return
+        end
+        visited[best] = true
+        saveVisited()
+        Library:Notify(('Hopping to a %d-player server...'):format(bestPlayers), 4)
+        local ok, err = pcall(function()
+            Teleport:TeleportToPlaceInstance(placeId, best, LocalPlayer)
+        end)
+        if not ok then Library:Notify('Teleport failed: ' .. tostring(err), 6) end
+    end
+
+    rejoinServer = function()
+        Library:Notify('Rejoining...', 3)
+        pcall(function() Teleport:TeleportToPlaceInstance(placeId, currentJob, LocalPlayer) end)
+    end
+
+    clearVisited = function()
+        visited = { [currentJob] = true }
+        saveVisited()
+        ServerLabel:SetText('Visited: 0 servers')
+        Library:Notify('Cleared visited server list', 3)
+    end
+end
+
+-- ---- Fly bodymovers ---------------------------------------------------------
+local flyVel, flyGyro
+local function stopFly()
+    if flyVel then flyVel:Destroy(); flyVel = nil end
+    if flyGyro then flyGyro:Destroy(); flyGyro = nil end
+end
+local function startFly()
+    local root = getRoot()
+    if not root then return end
+    stopFly()
+    flyVel = Instance.new('BodyVelocity')
+    flyVel.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+    flyVel.Velocity = Vector3.zero
+    flyVel.Parent = root
+    flyGyro = Instance.new('BodyGyro')
+    flyGyro.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
+    flyGyro.P = 9e4
+    flyGyro.CFrame = root.CFrame
+    flyGyro.Parent = root
+end
+
+Toggles.FlyEnabled:OnChanged(function()
+    if Toggles.FlyEnabled.Value then startFly() else stopFly() end
+end)
+
+-- ---- No Fog -----------------------------------------------------------------
+-- VV's LightingManager / WeatherClient re-applies fog on a cycle, so a one-shot
+-- set gets overwritten after ~20s. We re-force it on a throttled loop while on,
+-- and remember originals (per Atmosphere) so we can restore on disable/unload.
+local fogOriginals = {}            -- { saved=bool, FogEnd, FogStart }
+local atmoOriginals = {}           -- [Atmosphere] = { Density, Haze }
+
+local function applyNoFog()
+    Lighting.FogEnd = 1e6
+    Lighting.FogStart = 0
+    for _, v in Lighting:GetChildren() do
+        if v:IsA('Atmosphere') then
+            if atmoOriginals[v] == nil then
+                atmoOriginals[v] = { Density = v.Density, Haze = v.Haze }
+            end
+            v.Density = 0
+            v.Haze = 0
+        end
+    end
+end
+
+local function restoreFog()
+    if fogOriginals.saved then
+        Lighting.FogEnd = fogOriginals.FogEnd
+        Lighting.FogStart = fogOriginals.FogStart
+        fogOriginals.saved = false
+    end
+    for atmo, data in pairs(atmoOriginals) do
+        if atmo.Parent then
+            atmo.Density = data.Density
+            atmo.Haze = data.Haze
+        end
+    end
+    table.clear(atmoOriginals)
+end
+
+Toggles.NoFog:OnChanged(function()
+    if Toggles.NoFog.Value then
+        if not fogOriginals.saved then
+            fogOriginals.FogEnd = Lighting.FogEnd
+            fogOriginals.FogStart = Lighting.FogStart
+            fogOriginals.saved = true
+        end
+        applyNoFog()
+    else
+        restoreFog()
+    end
+end)
+
+-- Maintenance loop: re-assert No Fog ~4x/sec so the weather cycle can't undo it.
+local fogAccum = 0
+track(RunService.Heartbeat:Connect(function(dt)
+    if not Toggles.NoFog.Value then return end
+    fogAccum += dt
+    if fogAccum < 0.25 then return end
+    fogAccum = 0
+    applyNoFog()
+end))
+
+-- ---- AA gun (anti-cheat) airborne timer -------------------------------------
+local airborneTime = 0
+local lastAADeath = nil
+
+local function bindDeath(char)
+    local hum = char:FindFirstChildOfClass('Humanoid')
+    if not hum then return end
+    track(hum.Died:Connect(function()
+        -- Died after being airborne a while = almost certainly the AA gun.
+        if airborneTime > 1 then
+            lastAADeath = airborneTime
+            Library:Notify(('AA killed you after %.1fs airborne - set Est. AA time below this'):format(airborneTime), 8)
+        end
+    end))
+end
+
+if getChar() then bindDeath(getChar()) end
+track(LocalPlayer.CharacterAdded:Connect(function(char)
+    airborneTime = 0
+    task.wait(0.2)
+    bindDeath(char)
+end))
+
+local aaLabelAccum = 0
+track(RunService.Heartbeat:Connect(function(dt)
+    local hum = getHumanoid()
+    local airborne = hum and hum.FloorMaterial == Enum.Material.Air
+    airborneTime = airborne and (airborneTime + dt) or 0
+
+    local threshold = Options.AAThreshold.Value
+
+    -- Auto-disable fly ~1s early so you drop and the timer resets (checked every frame).
+    if Toggles.AAAutoDisableFly.Value and Toggles.FlyEnabled.Value
+       and airborneTime >= (threshold - 1) then
+        Toggles.FlyEnabled:SetValue(false)
+        Library:Notify('Auto-disabled fly to dodge AA gun', 3)
+    end
+
+    -- Throttle the label update (SetText triggers a groupbox resize).
+    aaLabelAccum += dt
+    if aaLabelAccum >= 0.1 then
+        aaLabelAccum = 0
+        local lastTxt = lastAADeath and (' | last AA @ %.1fs'):format(lastAADeath) or ''
+        if airborne then
+            local remaining = math.max(0, threshold - airborneTime)
+            AATimerLabel:SetText(('Airborne %.1fs | AA in ~%.1fs%s'):format(airborneTime, remaining, lastTxt))
+        else
+            AATimerLabel:SetText('Grounded' .. lastTxt)
+        end
+    end
+end))
+
+-- ---- Combat: parry action ---------------------------------------------------
+-- Attack animation IDs that should trigger a parry. Fill these in from the
+-- Animation Logger output (copy the rbxassetid:// string for each enemy attack).
+-- Curated from RemoteSpy anim logs. These are the SHORT, non-looping swing
+-- candidates. The 5.00s / 8.53s looping IDs were excluded (idle/walk loops),
+-- as were the sub-0.3s effect stubs. Prune anything that false-triggers.
+local ATTACK_ANIMS = {
+    -- Mob attacks
+    ['rbxassetid://17188146433'] = true,  -- 1.60s (fires often = likely M1)
+    ['rbxassetid://17188155225'] = true,  -- 3.13s
+    ['rbxassetid://17188289743'] = true,  -- 2.97s
+    ['rbxassetid://17188670401'] = true,  -- 2.07s
+    ['rbxassetid://17188382622'] = true,  -- 1.83s
+    ['rbxassetid://17188386684'] = true,  -- 1.95s
+
+    -- Player (WOLF_ELECTRO) attacks
+    ['rbxassetid://18998838518'] = true,  -- 1.75s
+    ['rbxassetid://18958401014'] = true,  -- 1.65s
+    ['rbxassetid://18958341833'] = true,  -- 2.47s
+    ['rbxassetid://18958397073'] = true,  -- 1.65s
+    ['rbxassetid://16417788544'] = true,  -- 0.78s (M1 combo swings)
+    ['rbxassetid://16417792446'] = true,  -- 0.93s
+    ['rbxassetid://16417798771'] = true,  -- 0.92s
+    ['rbxassetid://16417803802'] = true,  -- 0.93s
+}
+
+local Requests = RepStorage:FindFirstChild('Requests')
+
+local function fireRequest(name, ...)
+    if not Requests then return end
+    local r = Requests:FindFirstChild(name)
+    if r then r:FireServer(...) end
+end
+
+-- Confirmed via RemoteSpy:
+--   Mouse2     = block/parry press (no args)
+--   RedCounter = blade-catch / alt parry (no args)
+doParry = function()
+    if Options.ParryMethod.Value == 'RedCounter (blade catch)' then
+        fireRequest('RedCounter')
+    else
+        fireRequest('Mouse2')
+    end
+end
+
+-- Equip once when Auto Parry is enabled (assumes you start unequipped).
+Toggles.AutoParry:OnChanged(function()
+    if Toggles.AutoParry.Value and Toggles.AutoEquip.Value and Requests then
+        local c = Requests:FindFirstChild('Combat')
+        if c then c:FireServer('ToggleWeapon') end
+    end
+end)
+
+-- ---- Combat: animation logger + autoparry detection -------------------------
+local lastParry = 0
+local function scheduleParry(srcName, animName, animId)
+    if os.clock() - lastParry < Options.ParryCooldown.Value then return end
+    lastParry = os.clock()
+    -- Readout so you can see exactly which anim triggered a parry and prune it.
+    local msg = ('PARRIED %s | "%s" | %s'):format(srcName or '?', animName or '?', animId or '?')
+    print('[AutoParry] ' .. msg)
+    Library:Notify(msg, 2)
+    task.delay(Options.ParryReactionDelay.Value, function()
+        if doParry then doParry() end
+    end)
+end
+
+local function onAnimPlayed(char, animTrack)
+    local anim = animTrack.Animation
+    local animId = anim and anim.AnimationId or '?'
+    local animName = (anim and anim.Name ~= '' and anim.Name) or animTrack.Name or '?'
+    local oroot = char:FindFirstChild('HumanoidRootPart') or char.PrimaryPart
+    local myRoot = getRoot()
+    local dist = (myRoot and oroot) and (myRoot.Position - oroot.Position).Magnitude or math.huge
+    local isPlayer = Players:GetPlayerFromCharacter(char) ~= nil
+
+    if Toggles.LogAnims.Value and dist <= Options.LogAnimsRange.Value then
+        local hideLoop = Toggles.LogAnimsHideLooped.Value and animTrack.Looped
+        if not (Toggles.LogAnimsPlayersOnly.Value and not isPlayer) and not hideLoop then
+            print(('[Anim] %s (%s) | name "%s" | %s | %.0f studs | len %.2fs')
+                :format(char.Name, isPlayer and 'player' or 'mob', animName, animId, dist, animTrack.Length))
+        end
+    end
+
+    if Toggles.AutoParry.Value and dist <= Options.ParryDistance.Value and ATTACK_ANIMS[animId] then
+        if not (Toggles.ParryIgnorePlayers.Value and isPlayer) then
+            scheduleParry(char.Name, animName, animId)
+        end
+    end
+end
+
+local animHooked = {}
+local function hookAnimator(animator)
+    if animHooked[animator] then return end
+    local conn = animator.AnimationPlayed:Connect(function(animTrack)
+        local hum = animator.Parent
+        local char = hum and hum.Parent
+        if char and char ~= getChar() and char:FindFirstChildOfClass('Humanoid') then
+            pcall(onAnimPlayed, char, animTrack)
+        end
+    end)
+    animHooked[animator] = conn
+    track(conn)
+end
+
+for _, d in workspace:GetDescendants() do
+    if d:IsA('Animator') then hookAnimator(d) end
+end
+track(workspace.DescendantAdded:Connect(function(d)
+    if d:IsA('Animator') then hookAnimator(d) end
+end))
+
+-- ---- Infinite Jump ----------------------------------------------------------
+track(UIS.JumpRequest:Connect(function()
+    if Toggles.InfJumpEnabled.Value then
+        local hum = getHumanoid()
+        if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+    end
+end))
+
+-- ---- Per-frame loop: WalkSpeed / JumpPower / Fly / NoFallDamage -------------
+track(RunService.RenderStepped:Connect(function()
+    local hum = getHumanoid()
+
+    if hum then
+        if Toggles.WalkSpeedEnabled.Value then
+            hum.WalkSpeed = Options.WalkSpeedValue.Value
+        end
+        if Toggles.JumpPowerEnabled.Value then
+            hum.UseJumpPower = true
+            hum.JumpPower = Options.JumpPowerValue.Value
+        end
+    end
+
+    -- Fly movement (camera-relative)
+    if Toggles.FlyEnabled.Value and flyVel and flyGyro then
+        local speed = Options.FlySpeed.Value
+        local dir = Vector3.zero
+        local cf = Camera.CFrame
+        if UIS:IsKeyDown(Enum.KeyCode.W) then dir += cf.LookVector end
+        if UIS:IsKeyDown(Enum.KeyCode.S) then dir -= cf.LookVector end
+        if UIS:IsKeyDown(Enum.KeyCode.A) then dir -= cf.RightVector end
+        if UIS:IsKeyDown(Enum.KeyCode.D) then dir += cf.RightVector end
+        if UIS:IsKeyDown(Enum.KeyCode.Space) then dir += Vector3.new(0, 1, 0) end
+        if UIS:IsKeyDown(Enum.KeyCode.LeftControl) then dir -= Vector3.new(0, 1, 0) end
+
+        flyGyro.CFrame = cf
+        flyVel.Velocity = (dir.Magnitude > 0 and dir.Unit or Vector3.zero) * speed
+    end
+end))
+
+-- ---- Noclip (Stepped so CanCollide sticks) ----------------------------------
+track(RunService.Stepped:Connect(function()
+    if not Toggles.NoclipEnabled.Value then return end
+    local char = getChar()
+    if not char then return end
+    for _, part in char:GetDescendants() do
+        if part:IsA('BasePart') and part.CanCollide then
+            part.CanCollide = false
+        end
+    end
+end))
+
+-- ---- Restore defaults when a feature is turned OFF --------------------------
+Toggles.WalkSpeedEnabled:OnChanged(function()
+    if not Toggles.WalkSpeedEnabled.Value then
+        local hum = getHumanoid(); if hum then hum.WalkSpeed = 16 end
+    end
+end)
+Toggles.JumpPowerEnabled:OnChanged(function()
+    if not Toggles.JumpPowerEnabled.Value then
+        local hum = getHumanoid(); if hum then hum.JumpPower = 50 end
+    end
+end)
+
+-- ---- Re-apply fly after respawn while it's enabled --------------------------
+track(LocalPlayer.CharacterAdded:Connect(function()
+    if Toggles.FlyEnabled and Toggles.FlyEnabled.Value then
+        task.wait(0.3)
+        startFly()
+    end
+end))
+
+-- ============================================================================
+-- 6. UI Settings tab + addons
+-- ============================================================================
+local MenuGroup = Tabs['UI Settings']:AddLeftGroupbox('Menu')
+
+MenuGroup:AddButton('Unload', function() Library:Unload() end)
+MenuGroup:AddLabel('Menu bind'):AddKeyPicker('MenuKeybind', {
+    Default = 'End', NoUI = true, Text = 'Menu keybind',
+})
+Library.ToggleKeybind = Options.MenuKeybind
+
+Library:OnUnload(function()
+    MenuUnloaded = true -- makes the namecall hook pass everything through again
+    for _, conn in Connections do
+        pcall(function() conn:Disconnect() end)
+    end
+    stopFly()
+    restoreFog() -- put fog/atmosphere back if it was on
+    getgenv().GameTestMenu_Unload = nil
+    print('Game test menu unloaded')
+end)
+
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({ 'MenuKeybind' })
+ThemeManager:SetFolder('GameTestMenu')
+SaveManager:SetFolder('GameTestMenu')
+SaveManager:BuildConfigSection(Tabs['UI Settings'])
+ThemeManager:ApplyToTab(Tabs['UI Settings'])
+SaveManager:LoadAutoloadConfig()
