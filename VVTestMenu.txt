@@ -174,7 +174,7 @@ ServerBox:AddButton({
 })
 
 -- Combat tab ------------------------------------------------------------------
-local doParry, saveAttackDB, clearAttackDB -- forward-declared for the buttons
+local doParry, saveAttackDB, clearAttackDB, clearTimings, timedBlock -- forward-declared
 
 local ParryBox = Tabs.Combat:AddLeftGroupbox('Auto Parry')
 ParryBox:AddToggle('AutoParry', {
@@ -184,8 +184,8 @@ ParryBox:AddToggle('AutoParry', {
 })
 ParryBox:AddToggle('AutoEquip', {
     Text = 'Auto-equip on enable',
-    Default = true,
-    Tooltip = 'Pull your weapon out once when Auto Parry is switched on',
+    Default = false,
+    Tooltip = 'Fires ToggleWeapon when Auto Parry turns on. Leave OFF if your weapon is already out (it would unequip you).',
 })
 ParryBox:AddToggle('ParryIgnorePlayers', {
     Text = 'Ignore player anims',
@@ -208,9 +208,9 @@ ParryBox:AddDropdown('ParryMode', {
     Tooltip = 'Smart = parry any non-looping attack from a facing enemy (no ID list needed)',
 })
 ParryBox:AddDropdown('ParryTiming', {
-    Values = { 'On hit marker', 'On start', 'Fixed delay' },
+    Values = { 'Learned (trained)', 'On hit marker', 'On start', 'Fixed delay' },
     Default = 1, Multi = false, Text = 'Timing',
-    Tooltip = 'On hit marker = frame-perfect via the animation keyframe (best). Falls back to start if none.',
+    Tooltip = 'Learned = use the timings you taught it in the Parry Trainer. Falls back to markers for untrained attacks.',
 })
 ParryBox:AddSlider('ParryFacing', {
     Text = 'Facing', Default = 0.3, Min = -1, Max = 1, Rounding = 2,
@@ -225,11 +225,11 @@ ParryBox:AddToggle('AutoLearn', {
     Tooltip = 'When an attack hit-marker fires, save its anim ID to the database automatically',
 })
 ParryBox:AddDropdown('ParryMethod', {
-    Values = { 'Mouse2 (block/parry)', 'RedCounter (blade catch)', 'Block (Combat tap)' },
+    Values = { 'Right-click (real parry)', 'Mouse2 (block/parry)', 'RedCounter (blade catch)', 'Block (Combat tap)' },
     Default = 1,
     Multi = false,
     Text = 'Parry method',
-    Tooltip = 'Which remote Auto Parry / Test Parry fires',
+    Tooltip = 'Right-click = simulate a real RMB so VVs own parry window runs (recommended)',
 })
 ParryBox:AddButton({
     Text = 'Test Parry',
@@ -253,6 +253,30 @@ ParryBox:AddButton({
     Text = 'Clear learned DB',
     Func = function() if clearAttackDB then clearAttackDB() end end,
     Tooltip = 'Forget auto-learned attack IDs (keeps the built-in seed list)',
+})
+
+local TrainerBox = Tabs.Combat:AddLeftGroupbox('Parry Trainer')
+TrainerBox:AddLabel('Hold right-click & parry mobs manually -\nit learns the exact timing per attack.', true)
+local TrainerLabel = TrainerBox:AddLabel('Learned timings: 0')
+TrainerBox:AddToggle('TrainParry', {
+    Text = 'Train (learn my parries)', Default = false,
+    Tooltip = 'Records the hit timing whenever you parry an attack while blocking',
+})
+TrainerBox:AddSlider('ParryLead', {
+    Text = 'Parry lead', Default = 0.06, Min = 0, Max = 0.3, Rounding = 2, Suffix = ' s',
+    Tooltip = 'Raise block this long before the learned hit time',
+})
+TrainerBox:AddSlider('BlockHold', {
+    Text = 'Block hold', Default = 0.25, Min = 0.05, Max = 1, Rounding = 2, Suffix = ' s',
+    Tooltip = 'How long to hold block when parrying',
+})
+TrainerBox:AddLabel('Mark parry key'):AddKeyPicker('TrainMarkKey', {
+    Default = 'V', Mode = 'Toggle', Text = 'Mark parry (manual learn)',
+    Tooltip = 'Press the instant you parry to record that attack timing',
+})
+TrainerBox:AddButton({
+    Text = 'Clear timings',
+    Func = function() if clearTimings then clearTimings() end end,
 })
 
 local LogBox = Tabs.Combat:AddRightGroupbox('Animation Logger')
@@ -286,7 +310,17 @@ local EspBox = Tabs.Visuals:AddLeftGroupbox('Mob ESP')
 EspBox:AddToggle('MobESP', {
     Text = 'Mob ESP',
     Default = false,
-    Tooltip = 'Draw ESP on hollows/mobs (non-player Humanoids)',
+    Tooltip = 'Draw ESP on hollows/mobs (hostile non-player Humanoids, no interact prompt)',
+})
+EspBox:AddToggle('NPCESP', {
+    Text = 'NPC ESP',
+    Default = false,
+    Tooltip = 'Draw ESP on interactable NPCs (quest givers / vendors - they have a ProximityPrompt)',
+})
+EspBox:AddToggle('PlayerESP', {
+    Text = 'Player ESP',
+    Default = false,
+    Tooltip = 'Draw ESP on other players',
 })
 EspBox:AddToggle('ESPBoxes',    { Text = 'Boxes',     Default = true })
 EspBox:AddToggle('ESPNames',    { Text = 'Names',     Default = true })
@@ -295,8 +329,36 @@ EspBox:AddToggle('ESPDistance', { Text = 'Distance',  Default = true })
 EspBox:AddSlider('ESPMaxDistance', {
     Text = 'Max distance', Default = 500, Min = 50, Max = 2000, Rounding = 0, Suffix = ' studs',
 })
-EspBox:AddLabel('Box color'):AddColorPicker('ESPColor', {
-    Default = Color3.fromRGB(255, 80, 80), Title = 'ESP color',
+EspBox:AddLabel('Mob color'):AddColorPicker('ESPColor', {
+    Default = Color3.fromRGB(255, 80, 80), Title = 'Mob color',
+})
+EspBox:AddLabel('NPC color'):AddColorPicker('NPCColor', {
+    Default = Color3.fromRGB(90, 200, 255), Title = 'NPC color',
+})
+EspBox:AddLabel('Player color'):AddColorPicker('PlayerColor', {
+    Default = Color3.fromRGB(255, 255, 0), Title = 'Player color',
+})
+EspBox:AddToggle('ESPNameDebug', {
+    Text = 'Debug names (console)', Default = false,
+    Tooltip = 'Print where un-named entities might store their name (to fix "Mob")',
+})
+
+local ProxBox = Tabs.Visuals:AddRightGroupbox('Proximity')
+ProxBox:AddLabel('Ding + on-screen list of who is near.', true)
+ProxBox:AddToggle('ProxAlert', {
+    Text = 'Alert ding', Default = false,
+    Tooltip = 'Play a sound when someone enters range',
+})
+ProxBox:AddToggle('ProxList', {
+    Text = 'On-screen list', Default = false,
+    Tooltip = 'Show nearby names + distance on screen',
+})
+ProxBox:AddSlider('ProxRange', {
+    Text = 'Range', Default = 100, Min = 20, Max = 1000, Rounding = 0, Suffix = ' studs',
+})
+ProxBox:AddToggle('ProxIncludeMobs', {
+    Text = 'Include mobs/NPCs', Default = false,
+    Tooltip = 'Also alert/list nearby mobs and NPCs, not just players',
 })
 
 -- ============================================================================
@@ -629,6 +691,57 @@ do
         end
 
         local esp = {} -- [model] = { box, name, dist, hpbg, hpfg }
+        local classCache = setmetatable({}, { __mode = 'k' }) -- model -> 'mob'/'npc'
+        local nameCache  = setmetatable({}, { __mode = 'k' }) -- model -> resolved name
+
+        -- Interactable NPCs (quest givers/vendors) have a ProximityPrompt;
+        -- hostile mobs/hollows don't. That's how we tell them apart.
+        local function classify(model)
+            local c = classCache[model]
+            if c == nil then
+                c = model:FindFirstChildWhichIsA('ProximityPrompt', true) and 'npc' or 'mob'
+                classCache[model] = c
+            end
+            return c
+        end
+
+        local function looksLikeName(s)
+            return type(s) == 'string' and s ~= '' and #s <= 40
+                and s:match('%a') ~= nil and s:match('^%d+$') == nil and s:find('%%') == nil
+        end
+        -- Real name from: DisplayName -> model name -> attributes -> StringValues
+        -- -> overhead nameplate text. Caches once resolved.
+        local debugged = setmetatable({}, { __mode = 'k' })
+        local function entityName(model, hum)
+            local cached = nameCache[model]
+            if cached then return cached end
+            local nm
+            if hum and looksLikeName(hum.DisplayName) then nm = hum.DisplayName end
+            if not nm and looksLikeName(model.Name) then nm = model.Name end
+            if not nm then
+                for _, key in ipairs({ 'Name', 'DisplayName', 'MobName', 'EnemyName', 'Title' }) do
+                    if looksLikeName(model:GetAttribute(key)) then nm = model:GetAttribute(key); break end
+                end
+            end
+            if not nm then
+                for _, d in ipairs(model:GetDescendants()) do
+                    if d:IsA('StringValue') and looksLikeName(d.Value) then nm = d.Value; break end
+                    if (d:IsA('TextLabel') or d:IsA('TextButton')) and looksLikeName(d.Text) then nm = d.Text; break end
+                end
+            end
+            if nm then nameCache[model] = nm; return nm end
+            -- Still unknown: optional one-time dump so we can find where the name lives.
+            if Toggles.ESPNameDebug and Toggles.ESPNameDebug.Value and not debugged[model] then
+                debugged[model] = true
+                local labels = {}
+                for _, d in ipairs(model:GetDescendants()) do
+                    if d:IsA('TextLabel') or d:IsA('TextButton') then labels[#labels + 1] = ('%q'):format(d.Text) end
+                end
+                print(('[ESP name?] %s | model.Name=%q | display=%q | labels: %s')
+                    :format(model:GetFullName(), model.Name, hum and hum.DisplayName or '', table.concat(labels, ', ')))
+            end
+            return (model.Name ~= '' and model.Name) or 'Mob'
+        end
 
         local function newEsp()
             local function mk(class)
@@ -654,7 +767,7 @@ do
             for _, d in pairs(o) do pcall(function() d:Remove() end) end
         end
 
-        local function update(o, model, cam, maxD, color)
+        local function update(o, model, cam, maxD, color, name)
             local hum = model:FindFirstChildOfClass('Humanoid')
             local root = model:FindFirstChild('HumanoidRootPart') or model.PrimaryPart
             if not (hum and root and hum.Health > 0) then hide(o); return end
@@ -689,8 +802,7 @@ do
 
             -- Name
             o.name.Visible = Toggles.ESPNames.Value
-            o.name.Text = (hum.DisplayName ~= '' and hum.DisplayName)
-                or (model.Name ~= '' and model.Name) or 'Mob'
+            o.name.Text = name or entityName(model, hum)
             o.name.Color, o.name.Size, o.name.Center, o.name.Outline = color, 13, true, true
             o.name.Position = Vector2.new(minX + w / 2, minY - 16)
 
@@ -713,31 +825,109 @@ do
             o.hpfg.Size = Vector2.new(2, h * frac)
         end
 
+        -- Mobs/NPCs + other players, unified. Players carry their real name.
+        local function getEntities()
+            local list = {}
+            for _, m in ipairs(getMobs()) do
+                list[#list + 1] = { model = m, kind = classify(m) }
+            end
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LocalPlayer and p.Character then
+                    list[#list + 1] = { model = p.Character, kind = 'player', name = p.DisplayName }
+                end
+            end
+            return list
+        end
+
+        -- Proximity: ding on entry + on-screen nearby list -------------------
+        local SoundService = game:GetService('SoundService')
+        local proxInRange = {}
+        local proxTexts = {}
+        for i = 1, 12 do
+            local t = Drawing.new('Text')
+            t.Visible, t.Size, t.Outline, t.Center = false, 14, true, false
+            t.Color = Color3.new(1, 1, 1)
+            proxTexts[i] = t
+        end
+        local function clearProxList() for _, t in ipairs(proxTexts) do t.Visible = false end end
+        local function playDing()
+            local s = Instance.new('Sound')
+            s.SoundId = 'rbxasset://sounds/electronicpingshort.wav'
+            s.Volume = 1
+            pcall(function() SoundService:PlayLocalSound(s) end)
+        end
+        local function handleProximity(nearby)
+            local nowIn = {}
+            for _, n in ipairs(nearby) do nowIn[n.key] = true end
+            if Toggles.ProxAlert.Value then
+                for _, n in ipairs(nearby) do
+                    if not proxInRange[n.key] then playDing() end -- ding only on new entry
+                end
+            end
+            proxInRange = nowIn
+            if Toggles.ProxList.Value then
+                table.sort(nearby, function(a, b) return a.dist < b.dist end)
+                for i = 1, #proxTexts do
+                    local t, n = proxTexts[i], nearby[i]
+                    if n then
+                        t.Visible = true
+                        t.Text = ('%s  -  %.0f studs'):format(n.name, n.dist)
+                        t.Position = Vector2.new(14, 160 + (i - 1) * 16)
+                    else
+                        t.Visible = false
+                    end
+                end
+            else
+                clearProxList()
+            end
+        end
+
         track(RunService.RenderStepped:Connect(function()
-            if not Toggles.MobESP.Value then
+            local showMob = Toggles.MobESP.Value
+            local showNpc = Toggles.NPCESP.Value
+            local showPlr = Toggles.PlayerESP.Value
+            local proxOn  = Toggles.ProxAlert.Value or Toggles.ProxList.Value
+            if not (showMob or showNpc or showPlr or proxOn) then
                 for _, o in pairs(esp) do hide(o) end
+                clearProxList()
                 return
             end
             local cam = workspace.CurrentCamera
             local maxD = Options.ESPMaxDistance.Value
-            local color = Options.ESPColor.Value
+            local colorOf = { mob = Options.ESPColor.Value, npc = Options.NPCColor.Value, player = Options.PlayerColor.Value }
+            local myRoot = getRoot()
+            local proxRange, includeMobs = Options.ProxRange.Value, Toggles.ProxIncludeMobs.Value
 
-            local seen = {}
-            for _, model in ipairs(getMobs()) do
-                seen[model] = true
-                local o = esp[model]
-                if not o then o = newEsp(); esp[model] = o end
-                update(o, model, cam, maxD, color)
+            local seen, nearby = {}, {}
+            for _, e in ipairs(getEntities()) do
+                local model, kind = e.model, e.kind
+                local hum = model:FindFirstChildOfClass('Humanoid')
+                local root = model:FindFirstChild('HumanoidRootPart') or model.PrimaryPart
+                local nm = e.name or entityName(model, hum)
+
+                if (kind == 'mob' and showMob) or (kind == 'npc' and showNpc) or (kind == 'player' and showPlr) then
+                    seen[model] = true
+                    local o = esp[model]
+                    if not o then o = newEsp(); esp[model] = o end
+                    update(o, model, cam, maxD, colorOf[kind], nm)
+                end
+
+                if proxOn and root and myRoot and (kind == 'player' or includeMobs) then
+                    local d = (myRoot.Position - root.Position).Magnitude
+                    if d <= proxRange then nearby[#nearby + 1] = { name = nm, dist = d, key = model } end
+                end
             end
             for model, o in pairs(esp) do
                 if not seen[model] or not model.Parent then
                     removeEsp(o); esp[model] = nil
                 end
             end
+            handleProximity(nearby)
         end))
 
         espCleanup = function()
             for model, o in pairs(esp) do removeEsp(o); esp[model] = nil end
+            for _, t in ipairs(proxTexts) do pcall(function() t:Remove() end) end
         end
     end
 end
@@ -834,7 +1024,9 @@ end
 --   RedCounter = blade-catch / alt parry (no args)
 doParry = function()
     local m = Options.ParryMethod.Value
-    if m == 'RedCounter (blade catch)' then
+    if m == 'Right-click (real parry)' then
+        if timedBlock then timedBlock() end
+    elseif m == 'RedCounter (blade catch)' then
         fireRequest('RedCounter')
     elseif m == 'Block (Combat tap)' then
         -- Quick block press+release = a parry if timed on the attack's active frame
@@ -852,6 +1044,108 @@ Toggles.AutoParry:OnChanged(function()
         if c then c:FireServer('ToggleWeapon') end
     end
 end)
+
+-- ---- Parry Trainer: learn the exact parry timing per attack -----------------
+-- VV has no parry remote - a parry is a block raised on the hit frame. So we
+-- learn, per attack animation, how far in the parry landed, then replay a
+-- timed block at that exact point. Persisted to file so it accumulates.
+local TIMINGS_FILE = 'GameTestMenu/parry_timings.json'
+local learnedTiming = {}   -- [animId] = { t = avgSeconds, n = sampleCount }
+local recentAttack         -- most recent in-range enemy attack (for manual mark)
+
+pcall(function()
+    if isfile and isfile(TIMINGS_FILE) then
+        learnedTiming = HttpServ:JSONDecode(readfile(TIMINGS_FILE)) or {}
+    end
+end)
+
+local function timingCount()
+    local n = 0
+    for _ in pairs(learnedTiming) do n += 1 end
+    return n
+end
+local function updateTrainerLabel()
+    if TrainerLabel then TrainerLabel:SetText(('Learned timings: %d'):format(timingCount())) end
+end
+updateTrainerLabel()
+
+local function saveTimings()
+    pcall(function()
+        if makefolder and isfolder and not isfolder('GameTestMenu') then makefolder('GameTestMenu') end
+        if writefile then writefile(TIMINGS_FILE, HttpServ:JSONEncode(learnedTiming)) end
+    end)
+end
+local function recordTiming(animId, t)
+    if not animId or animId == '?' or not t or t <= 0 then return end
+    local e = learnedTiming[animId]
+    if e then
+        e.t = (e.t * e.n + t) / (e.n + 1)
+        e.n += 1
+    else
+        learnedTiming[animId] = { t = t, n = 1 }
+    end
+    ATTACK_ANIMS[animId] = true -- a parried anim is definitely an attack
+    saveTimings()
+    updateTrainerLabel()
+    print(('[Trainer] %s -> %.3fs (n=%d)'):format(animId, learnedTiming[animId].t, learnedTiming[animId].n))
+    Library:Notify(('Learned parry @ %.2fs'):format(t), 2)
+end
+clearTimings = function()
+    learnedTiming = {}
+    saveTimings()
+    updateTrainerLabel()
+    Library:Notify('Cleared learned parry timings', 3)
+end
+
+-- Block state (right-click). A successful parry = block raised on the hit frame.
+local blocking = false
+local lastBlockTime = 0
+track(UIS.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton2 then blocking = true end
+end))
+track(UIS.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton2 then blocking = false; lastBlockTime = os.clock() end
+end))
+
+-- A parry is a real right-click (MB2). From RemoteSpy, RMB down fires
+-- Requests.Mouse2 and RMB up fires Requests.Combat('Block', false). We send
+-- that exact sequence so it reaches the server reliably (the Combat 'Block'
+-- press alone only blocks - Mouse2 is the actual parry press). We ALSO fire the
+-- hardware input if the executor exposes it, so VV's own client parry runs too.
+local VIM = game:GetService('VirtualInputManager')
+local hasSim = type(mouse2press) == 'function' and type(mouse2release) == 'function'
+local function rmb(down)
+    if down and mouse2press then pcall(mouse2press); return end
+    if (not down) and mouse2release then pcall(mouse2release); return end
+    pcall(function()
+        local mp = UIS:GetMouseLocation()
+        VIM:SendMouseButtonEvent(mp.X, mp.Y, 1, down, game, 0)
+    end)
+end
+timedBlock = function()
+    fireRequest('Mouse2')          -- block/parry PRESS (the real RMB-down remote)
+    rmb(true)                      -- + hardware press if available
+    task.delay(Options.BlockHold.Value, function()
+        fireRequest('Combat', 'Block', false) -- release (the real RMB-up remote)
+        rmb(false)
+    end)
+end
+
+Library:Notify('Parry: Mouse2 remote' .. (hasSim and ' + input sim' or ''), 6)
+
+-- Manual mark: press the keybind the instant you parry to record that timing.
+if Options.TrainMarkKey then
+    Options.TrainMarkKey:OnClick(function()
+        local ra = recentAttack
+        if ra and ra.track and ra.track.IsPlaying then
+            recordTiming(ra.animId, ra.track.TimePosition)
+        elseif ra then
+            recordTiming(ra.animId, os.clock() - ra.startC)
+        else
+            Library:Notify('No recent enemy attack to mark', 2)
+        end
+    end)
+end
 
 -- ---- Combat: animation logger + autoparry detection -------------------------
 local lastParry = 0
@@ -890,6 +1184,30 @@ local function onAnimPlayed(char, animTrack)
         end
     end
 
+    -- TRAINING: learn parry timing from your manual blocks -------------------
+    if not looped and dist <= Options.ParryDistance.Value + 5
+       and not (Toggles.ParryIgnorePlayers.Value and isPlayer) then
+        recentAttack = { animId = animId, track = animTrack, startC = os.clock() }
+        if Toggles.TrainParry.Value then
+            local sc
+            sc = animTrack.Stopped:Connect(function()
+                if sc then sc:Disconnect() end
+                -- A parry cuts the attacker's swing short. So: attack stopped
+                -- EARLY + you were blocking around then = you parried it.
+                local stoppedAt = animTrack.TimePosition
+                local interrupted = stoppedAt < (animTrack.Length - 0.10)
+                local blockedRecently = blocking or (os.clock() - lastBlockTime) < 0.40
+                -- Diagnostic so we can confirm VV cancels attacks on parry.
+                print(('[Trainer] %s stopped %.2f/%.2fs | interrupted=%s blocked=%s')
+                    :format(animId, stoppedAt, animTrack.Length, tostring(interrupted), tostring(blockedRecently)))
+                if interrupted and blockedRecently then
+                    recordTiming(animId, stoppedAt) -- record the parry/hit point
+                end
+            end)
+            task.delay(animTrack.Length + 1, function() if sc then sc:Disconnect() end end)
+        end
+    end
+
     -- AUTO PARRY -------------------------------------------------------------
     if not Toggles.AutoParry.Value then return end
     if looped then return end                                  -- never parry idle loops
@@ -907,6 +1225,23 @@ local function onAnimPlayed(char, animTrack)
     if not consider then return end
 
     local timing = Options.ParryTiming.Value
+
+    -- Learned: raise a block at the exact per-attack time you taught it.
+    if timing == 'Learned (trained)' then
+        local e = learnedTiming[animId]
+        if e then
+            local when = math.max(0, e.t - Options.ParryLead.Value)
+            task.delay(when, function()
+                if os.clock() - lastParry < Options.ParryCooldown.Value then return end
+                lastParry = os.clock()
+                print(('[AutoParry] trained block %s @ %.2fs'):format(animId, e.t))
+                Library:Notify(('Parry %s'):format(char.Name), 2)
+                timedBlock()
+            end)
+            return
+        end
+        timing = 'On hit marker' -- untrained attack: fall back to markers
+    end
 
     -- On hit marker: parry exactly when a hit keyframe fires (frame-perfect),
     -- and learn the ID. Falls back to a start-parry if no marker shows up.
