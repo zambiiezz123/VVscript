@@ -202,7 +202,7 @@ ParryBox:AddSlider('ParryCooldown', {
     Text = 'Cooldown', Default = 0.4, Min = 0, Max = 3, Rounding = 2, Suffix = ' s',
 })
 ParryBox:AddDropdown('ParryMethod', {
-    Values = { 'Mouse2 (block/parry)', 'RedCounter (blade catch)' },
+    Values = { 'Mouse2 (block/parry)', 'RedCounter (blade catch)', 'Block (Combat tap)' },
     Default = 1,
     Multi = false,
     Text = 'Parry method',
@@ -237,14 +237,53 @@ LogBox:AddSlider('LogAnimsRange', {
     Text = 'Log range', Default = 80, Min = 10, Max = 300, Rounding = 0, Suffix = ' studs',
 })
 
+local SpyBox = Tabs.Combat:AddRightGroupbox('Remote Spy')
+SpyBox:AddLabel('Logs FireServer / InvokeServer to\nthe console (F9). No 2nd script needed.', true)
+SpyBox:AddToggle('RemoteSpy', {
+    Text = 'Remote Spy',
+    Default = false,
+    Tooltip = 'Print every remote your client fires to the server',
+})
+
 -- ============================================================================
 -- 5. LOGIC
 -- ============================================================================
 
--- ---- Remote block hook (client-sided damage) --------------------------------
+-- ---- Remote Spy logging (folded into the menu's single namecall hook) -------
+local SPY = { MaxDepth = 1, Dedupe = 0.3 }
+local spyLastSeen, spyCount = {}, 0
+local function spyDescribe(v, depth)
+    local t = typeof(v)
+    if t == 'Instance' then return ('<%s> %s'):format(v.ClassName, v:GetFullName())
+    elseif t == 'string' then return ('%q'):format(v)
+    elseif t == 'function' then return 'function'
+    elseif t == 'table' then
+        if depth >= SPY.MaxDepth then return '{...}' end
+        local parts = {}
+        for k, val in pairs(v) do
+            parts[#parts + 1] = ('[%s]=%s'):format(tostring(k), spyDescribe(val, depth + 1))
+            if #parts >= 15 then parts[#parts + 1] = '...'; break end
+        end
+        return '{ ' .. table.concat(parts, ', ') .. ' }'
+    else return tostring(v) .. ' (' .. t .. ')' end
+end
+local function spyLog(method, remote, args)
+    local key = remote:GetFullName() .. method
+    local now = os.clock()
+    if spyLastSeen[key] and (now - spyLastSeen[key]) < SPY.Dedupe then return end
+    spyLastSeen[key] = now
+    spyCount += 1
+    local out, n = {}, (args.n or #args)
+    if n == 0 then out[1] = '  (no args)'
+    else for i = 1, n do out[i] = ('  [%d] %s'):format(i, spyDescribe(args[i], 0)) end end
+    print(('====== [Spy #%d] %s : %s ======\n%s')
+        :format(spyCount, method, remote:GetFullName(), table.concat(out, '\n')))
+end
+
+-- ---- Remote block hook (client-sided damage) + spy --------------------------
 -- VV computes fall damage on the client and fires Requests.TakeDamage(amount)
--- to apply it. Dropping that call = no fall damage. If poison uses the same
--- remote, this blocks it too.
+-- to apply it. Dropping that call = no fall damage. The same hook also powers
+-- the Remote Spy toggle, so we never install a second __namecall hook.
 local MenuUnloaded = false
 do
     local hookmetamethod   = hookmetamethod
@@ -256,16 +295,27 @@ do
         local oldNamecall
         oldNamecall = hookmetamethod(game, '__namecall', newcclosure(function(self, ...)
             if not MenuUnloaded and not checkcaller() and typeof(self) == 'Instance' then
-                if getnamecallmethod() == 'FireServer' and self.ClassName == 'RemoteEvent'
-                   and self.Name == 'TakeDamage'
+                local method = getnamecallmethod()
+                local class = self.ClassName
+
+                -- No Fall Damage: drop the self-damage report
+                if method == 'FireServer' and class == 'RemoteEvent' and self.Name == 'TakeDamage'
                    and Toggles.NoFallDamage and Toggles.NoFallDamage.Value then
-                    return -- drop the self-damage report; server never gets told
+                    return
+                end
+
+                -- Remote Spy: log off the hot path so inputs are never eaten
+                if Toggles.RemoteSpy and Toggles.RemoteSpy.Value
+                   and (method == 'FireServer' or method == 'InvokeServer')
+                   and (class == 'RemoteEvent' or class == 'RemoteFunction') then
+                    local remote, args = self, table.pack(...)
+                    task.spawn(function() pcall(spyLog, method, remote, args) end)
                 end
             end
             return oldNamecall(self, ...)
         end))
     else
-        Library:Notify('Executor lacks hookmetamethod - No Fall Damage will not work', 6)
+        Library:Notify('Executor lacks hookmetamethod - No Fall Damage / Spy will not work', 6)
     end
 end
 
@@ -534,8 +584,13 @@ end
 --   Mouse2     = block/parry press (no args)
 --   RedCounter = blade-catch / alt parry (no args)
 doParry = function()
-    if Options.ParryMethod.Value == 'RedCounter (blade catch)' then
+    local m = Options.ParryMethod.Value
+    if m == 'RedCounter (blade catch)' then
         fireRequest('RedCounter')
+    elseif m == 'Block (Combat tap)' then
+        -- Quick block press+release = a parry if timed on the attack's active frame
+        fireRequest('Combat', 'Block', true)
+        task.delay(0.15, function() fireRequest('Combat', 'Block', false) end)
     else
         fireRequest('Mouse2')
     end
