@@ -174,7 +174,7 @@ ServerBox:AddButton({
 })
 
 -- Combat tab ------------------------------------------------------------------
-local doParry -- forward-declared so the Test Parry button can call it
+local doParry, saveAttackDB, clearAttackDB -- forward-declared for the buttons
 
 local ParryBox = Tabs.Combat:AddLeftGroupbox('Auto Parry')
 ParryBox:AddToggle('AutoParry', {
@@ -202,6 +202,28 @@ ParryBox:AddSlider('ParryReactionDelay', {
 ParryBox:AddSlider('ParryCooldown', {
     Text = 'Cooldown', Default = 0.4, Min = 0, Max = 3, Rounding = 2, Suffix = ' s',
 })
+ParryBox:AddDropdown('ParryMode', {
+    Values = { 'Smart (no setup)', 'Database (IDs)', 'Both' },
+    Default = 3, Multi = false, Text = 'Detect mode',
+    Tooltip = 'Smart = parry any non-looping attack from a facing enemy (no ID list needed)',
+})
+ParryBox:AddDropdown('ParryTiming', {
+    Values = { 'On hit marker', 'On start', 'Fixed delay' },
+    Default = 1, Multi = false, Text = 'Timing',
+    Tooltip = 'On hit marker = frame-perfect via the animation keyframe (best). Falls back to start if none.',
+})
+ParryBox:AddSlider('ParryFacing', {
+    Text = 'Facing', Default = 0.3, Min = -1, Max = 1, Rounding = 2,
+    Tooltip = 'How much the enemy must face you (-1 = ignore, ~0.3 = front arc)',
+})
+ParryBox:AddSlider('ParryMinLen', {
+    Text = 'Min anim len', Default = 0.3, Min = 0, Max = 2, Rounding = 2, Suffix = ' s',
+    Tooltip = 'Smart mode ignores animations shorter than this (filters tiny effect stubs)',
+})
+ParryBox:AddToggle('AutoLearn', {
+    Text = 'Auto-learn attacks', Default = true,
+    Tooltip = 'When an attack hit-marker fires, save its anim ID to the database automatically',
+})
 ParryBox:AddDropdown('ParryMethod', {
     Values = { 'Mouse2 (block/parry)', 'RedCounter (blade catch)', 'Block (Combat tap)' },
     Default = 1,
@@ -222,6 +244,15 @@ ParryBox:AddButton({
         if r then r:FireServer('ToggleWeapon') end
     end,
     Tooltip = 'Manually equip/unequip your weapon',
+}):AddButton({
+    Text = 'Save DB',
+    Func = function() if saveAttackDB then saveAttackDB() end end,
+    Tooltip = 'Write learned attack IDs to file',
+})
+ParryBox:AddButton({
+    Text = 'Clear learned DB',
+    Func = function() if clearAttackDB then clearAttackDB() end end,
+    Tooltip = 'Forget auto-learned attack IDs (keeps the built-in seed list)',
 })
 
 local LogBox = Tabs.Combat:AddRightGroupbox('Animation Logger')
@@ -233,6 +264,10 @@ LogBox:AddToggle('LogAnimsPlayersOnly', {
 LogBox:AddToggle('LogAnimsHideLooped', {
     Text = 'Hide looped (idle) anims', Default = true,
     Tooltip = 'Idles loop, attacks do not - hides the 5s/8s idle spam',
+})
+LogBox:AddToggle('LogMarkers', {
+    Text = 'Log anim markers', Default = false,
+    Tooltip = 'Also print KeyframeReached marker names + times - use this to find the hit marker',
 })
 LogBox:AddSlider('LogAnimsRange', {
     Text = 'Log range', Default = 80, Min = 10, Max = 300, Rounding = 0, Suffix = ' studs',
@@ -734,6 +769,58 @@ local ATTACK_ANIMS = {
     ['rbxassetid://16417803802'] = true,  -- 0.93s
 }
 
+-- Keyframe/marker names that mean "the attack is connecting now". VV's exact
+-- names may differ - use the Animation Logger's "Log markers" to find them and
+-- add any extras here. Matching is case-insensitive (see markerIsHit).
+local HIT_MARKERS = {
+    hit = true, cast = true, swing = true, damage = true, attack = true,
+    active = true, hitbox = true, m1 = true, slash = true, contact = true,
+}
+local function markerIsHit(name)
+    return type(name) == 'string' and HIT_MARKERS[name:lower()] == true
+end
+
+-- Auto-learned attack DB (persisted). Seeds from the table above + saved file.
+local DB_FILE = 'GameTestMenu/attack_anims.json'
+local learned = {}
+pcall(function()
+    if isfile and isfile(DB_FILE) then
+        for id in pairs(HttpServ:JSONDecode(readfile(DB_FILE)) or {}) do
+            ATTACK_ANIMS[id] = true; learned[id] = true
+        end
+    end
+end)
+saveAttackDB = function()
+    pcall(function()
+        if makefolder and isfolder and not isfolder('GameTestMenu') then makefolder('GameTestMenu') end
+        if writefile then writefile(DB_FILE, HttpServ:JSONEncode(learned)) end
+    end)
+    Library:Notify('Saved attack DB', 3)
+end
+clearAttackDB = function()
+    for id in pairs(learned) do learned[id] = nil end
+    saveAttackDB()
+    Library:Notify('Cleared learned attack DB', 3)
+end
+local function learnAnim(id)
+    if id and id ~= '?' and not learned[id] then
+        ATTACK_ANIMS[id] = true
+        learned[id] = true
+        pcall(saveAttackDB)
+        print('[AutoParry] learned attack anim: ' .. id)
+    end
+end
+
+-- Is `char` facing roughly toward us? (dot of their look vs direction to us)
+local function facingMe(char)
+    local hrp = char:FindFirstChild('HumanoidRootPart') or char.PrimaryPart
+    local myRoot = getRoot()
+    if not (hrp and myRoot) then return true end
+    local toMe = myRoot.Position - hrp.Position
+    if toMe.Magnitude < 1 then return true end
+    return hrp.CFrame.LookVector:Dot(toMe.Unit) >= Options.ParryFacing.Value
+end
+
 local Requests = RepStorage:FindFirstChild('Requests')
 
 local function fireRequest(name, ...)
@@ -768,16 +855,13 @@ end)
 
 -- ---- Combat: animation logger + autoparry detection -------------------------
 local lastParry = 0
-local function scheduleParry(srcName, animName, animId)
+local function fireParryNow(srcName, animName, animId, why)
     if os.clock() - lastParry < Options.ParryCooldown.Value then return end
     lastParry = os.clock()
-    -- Readout so you can see exactly which anim triggered a parry and prune it.
-    local msg = ('PARRIED %s | "%s" | %s'):format(srcName or '?', animName or '?', animId or '?')
+    local msg = ('PARRIED %s | "%s" | %s | %s'):format(srcName or '?', animName or '?', animId or '?', why or '')
     print('[AutoParry] ' .. msg)
-    Library:Notify(msg, 2)
-    task.delay(Options.ParryReactionDelay.Value, function()
-        if doParry then doParry() end
-    end)
+    Library:Notify(('PARRIED %s (%s)'):format(srcName or '?', why or ''), 2)
+    if doParry then doParry() end
 end
 
 local function onAnimPlayed(char, animTrack)
@@ -788,20 +872,68 @@ local function onAnimPlayed(char, animTrack)
     local myRoot = getRoot()
     local dist = (myRoot and oroot) and (myRoot.Position - oroot.Position).Magnitude or math.huge
     local isPlayer = Players:GetPlayerFromCharacter(char) ~= nil
+    local looped = animTrack.Looped
 
+    -- LOGGING ----------------------------------------------------------------
     if Toggles.LogAnims.Value and dist <= Options.LogAnimsRange.Value then
-        local hideLoop = Toggles.LogAnimsHideLooped.Value and animTrack.Looped
+        local hideLoop = Toggles.LogAnimsHideLooped.Value and looped
         if not (Toggles.LogAnimsPlayersOnly.Value and not isPlayer) and not hideLoop then
-            print(('[Anim] %s (%s) | name "%s" | %s | %.0f studs | len %.2fs')
-                :format(char.Name, isPlayer and 'player' or 'mob', animName, animId, dist, animTrack.Length))
+            print(('[Anim] %s (%s) | name "%s" | %s | %.0f studs | len %.2fs | looped=%s')
+                :format(char.Name, isPlayer and 'player' or 'mob', animName, animId, dist, animTrack.Length, tostring(looped)))
+            if Toggles.LogMarkers.Value then
+                local mc
+                mc = animTrack.KeyframeReached:Connect(function(kf)
+                    print(('    [marker] %s : "%s" @ %.2fs'):format(animId, tostring(kf), animTrack.TimePosition))
+                end)
+                task.delay(animTrack.Length + 0.3, function() if mc then mc:Disconnect() end end)
+            end
         end
     end
 
-    if Toggles.AutoParry.Value and dist <= Options.ParryDistance.Value and ATTACK_ANIMS[animId] then
-        if not (Toggles.ParryIgnorePlayers.Value and isPlayer) then
-            scheduleParry(char.Name, animName, animId)
+    -- AUTO PARRY -------------------------------------------------------------
+    if not Toggles.AutoParry.Value then return end
+    if looped then return end                                  -- never parry idle loops
+    if dist > Options.ParryDistance.Value then return end
+    if Toggles.ParryIgnorePlayers.Value and isPlayer then return end
+
+    local mode = Options.ParryMode.Value
+    local known = ATTACK_ANIMS[animId] == true
+    local smartOk = facingMe(char) and animTrack.Length >= Options.ParryMinLen.Value
+
+    local consider
+    if mode == 'Database (IDs)' then consider = known
+    elseif mode == 'Smart (no setup)' then consider = smartOk
+    else consider = known or smartOk end                       -- Both
+    if not consider then return end
+
+    local timing = Options.ParryTiming.Value
+
+    -- On hit marker: parry exactly when a hit keyframe fires (frame-perfect),
+    -- and learn the ID. Falls back to a start-parry if no marker shows up.
+    if timing == 'On hit marker' then
+        local done = false
+        local mc
+        mc = animTrack.KeyframeReached:Connect(function(kf)
+            if done or not markerIsHit(kf) then return end
+            done = true
+            if Toggles.AutoLearn.Value then learnAnim(animId) end
+            fireParryNow(char.Name, animName, animId, 'marker:' .. tostring(kf))
+            if mc then mc:Disconnect() end
+        end)
+        task.delay(animTrack.Length + 0.3, function() if mc then mc:Disconnect() end end)
+        -- Fallback: if this anim is a known attack but fired no hit marker,
+        -- parry near the end of its windup so we don't miss it entirely.
+        if known then
+            task.delay(math.max(0, animTrack.Length * 0.5), function()
+                if not done then done = true; fireParryNow(char.Name, animName, animId, 'known-fallback') end
+            end)
         end
+        return
     end
+
+    -- On start: parry immediately. Fixed delay: wait the react slider first.
+    local lead = (timing == 'Fixed delay') and Options.ParryReactionDelay.Value or 0
+    task.delay(lead, function() fireParryNow(char.Name, animName, animId, timing) end)
 end
 
 local animHooked = {}
