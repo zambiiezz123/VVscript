@@ -125,6 +125,46 @@ MoveBox:AddSlider('JumpPowerValue', {
     Text = 'Jump power', Default = 50, Min = 50, Max = 500, Rounding = 0,
 })
 
+-- Attach to back: teleport behind the nearest target each frame
+MoveBox:AddToggle('AttachBack', {
+    Text = 'Attach to back',
+    Default = false,
+    Tooltip = 'Teleport behind the nearest target each frame (faces them)',
+}):AddKeyPicker('AttachKey', {
+    Default = 'B', SyncToggleState = true, Mode = 'Toggle', Text = 'Attach to back',
+})
+MoveBox:AddToggle('AttachOnlyMobs', {
+    Text = 'Only hollows/mobs',
+    Default = true,
+    Tooltip = 'Only attach to hostile mobs, never NPCs or players',
+})
+MoveBox:AddSlider('AttachDistance', {
+    Text = 'Attach distance', Default = 5, Min = 0, Max = 30, Rounding = 1, Suffix = ' studs',
+})
+MoveBox:AddSlider('AttachY', {
+    Text = 'Attach Y level', Default = 0, Min = -10, Max = 10, Rounding = 1, Suffix = ' studs',
+})
+MoveBox:AddSlider('AttachRange', {
+    Text = 'Attach max range', Default = 50, Min = 5, Max = 300, Rounding = 0, Suffix = ' studs',
+    Tooltip = 'Only attach to targets within this range (prevents TPing across the map)',
+})
+MoveBox:AddSlider('AttachSpeed', {
+    Text = 'Attach smoothness', Default = 0.35, Min = 0.03, Max = 1, Rounding = 2,
+    Tooltip = 'Glide speed to the target. Lower = smoother tween, less likely to be kicked. 1 = instant snap.',
+})
+MoveBox:AddToggle('AttachDodge', {
+    Text = 'Auto-dodge target attacks',
+    Default = false,
+    Tooltip = 'When the attach target swings, back off briefly then re-attach',
+})
+MoveBox:AddSlider('DodgeDistance', {
+    Text = 'Dodge back', Default = 12, Min = 2, Max = 40, Rounding = 0, Suffix = ' studs',
+})
+MoveBox:AddSlider('DodgeTime', {
+    Text = 'Dodge time', Default = 0.35, Min = 0.1, Max = 1, Rounding = 2, Suffix = ' s',
+    Tooltip = 'How long to stay backed off after the target starts an attack',
+})
+
 -- World features
 WorldBox:AddToggle('NoFallDamage', {
     Text = 'No Fall Damage',
@@ -220,9 +260,21 @@ ParryBox:AddSlider('ParryMinLen', {
     Text = 'Min anim len', Default = 0.3, Min = 0, Max = 2, Rounding = 2, Suffix = ' s',
     Tooltip = 'Smart mode ignores animations shorter than this (filters tiny effect stubs)',
 })
+ParryBox:AddSlider('ParryFallback', {
+    Text = 'Untrained hit %', Default = 0.5, Min = 0.1, Max = 1, Rounding = 2,
+    Tooltip = 'For attacks you have not trained, parry at this fraction of the animation length (so they are not missed)',
+})
 ParryBox:AddToggle('AutoLearn', {
     Text = 'Auto-learn attacks', Default = true,
     Tooltip = 'When an attack hit-marker fires, save its anim ID to the database automatically',
+})
+ParryBox:AddToggle('AutoTrain', {
+    Text = 'Learn timings while fighting', Default = true,
+    Tooltip = 'When an auto-parry lands (the attack gets interrupted), record its exact timing - the DB self-trains as you fight',
+})
+ParryBox:AddToggle('ReadFeints', {
+    Text = 'Read feints', Default = true,
+    Tooltip = 'Do not parry if the attack cancels before its hit (the mob feinted to bait your parry)',
 })
 ParryBox:AddDropdown('ParryMethod', {
     Values = { 'Right-click (real parry)', 'Mouse2 (block/parry)', 'RedCounter (blade catch)', 'Block (Combat tap)' },
@@ -293,6 +345,10 @@ LogBox:AddToggle('LogMarkers', {
     Text = 'Log anim markers', Default = false,
     Tooltip = 'Also print KeyframeReached marker names + times - use this to find the hit marker',
 })
+LogBox:AddToggle('LogMyAnims', {
+    Text = 'Log MY anims', Default = false,
+    Tooltip = 'Log animations on YOUR character - use this to find the stun anim ID for No Stun',
+})
 LogBox:AddSlider('LogAnimsRange', {
     Text = 'Log range', Default = 80, Min = 10, Max = 300, Rounding = 0, Suffix = ' studs',
 })
@@ -303,6 +359,46 @@ SpyBox:AddToggle('RemoteSpy', {
     Text = 'Remote Spy',
     Default = false,
     Tooltip = 'Print every remote your client fires to the server',
+})
+
+-- Experimental: VV sends combat as buffer packets through ONE remote
+-- (PacketNetworking_Remote). We can't read the buffer's intent, so we duplicate
+-- the packet(s) fired right after a left-click (M1) to try to stack hits.
+-- No RakNet needed - re-firing the buffer via the normal remote is far safer.
+local ExpBox = Tabs.Combat:AddRightGroupbox('Experimental')
+ExpBox:AddLabel('Stacks the packet sent right after you\nleft-click (M1), to try double hits.', true)
+ExpBox:AddToggle('StackEnabled', {
+    Text = 'Stack M1 packets', Default = false,
+    Tooltip = 'Duplicate the packet(s) fired just after a left-click',
+})
+ExpBox:AddInput('StackRemote', {
+    Text = 'Packet remote', Default = 'PacketNetworking_Remote',
+})
+ExpBox:AddSlider('StackCount', {
+    Text = 'Fire count', Default = 2, Min = 1, Max = 6, Rounding = 0,
+})
+ExpBox:AddSlider('StackWindow', {
+    Text = 'Click window', Default = 0.04, Min = 0.01, Max = 0.2, Rounding = 2, Suffix = ' s',
+    Tooltip = 'Duplicate packets fired within this long after the click (smaller = more M1-specific)',
+})
+ExpBox:AddToggle('NoStun', {
+    Text = 'No stun (cancel stun anims)', Default = false,
+    Tooltip = 'Stops stun animations on your character so you can act through hits. Fill stun IDs via "Log MY anims".',
+})
+ExpBox:AddToggle('AIBreaker', {
+    Text = 'AI breaker', Default = false,
+    Tooltip = 'Disable nearby mob AI so they cannot attack/parry. Only works if VV lets the client own the mob (network ownership). Experimental.',
+})
+ExpBox:AddDropdown('AIBreakMethod', {
+    Values = { 'Stop combat anims', 'Freeze + slow', 'Ragdoll (physics)', 'All' },
+    Default = 4, Multi = false, Text = 'AI break method',
+})
+ExpBox:AddSlider('AIBreakRange', {
+    Text = 'AI break range', Default = 60, Min = 10, Max = 300, Rounding = 0, Suffix = ' studs',
+})
+ExpBox:AddToggle('AIBreakTargetOnly', {
+    Text = 'AI break: target only', Default = false,
+    Tooltip = 'Only break the locked attach target, not every nearby mob',
 })
 
 -- Visuals tab: Mob ESP --------------------------------------------------------
@@ -372,6 +468,14 @@ local function spyDescribe(v, depth)
     local t = typeof(v)
     if t == 'Instance' then return ('<%s> %s'):format(v.ClassName, v:GetFullName())
     elseif t == 'string' then return ('%q'):format(v)
+    elseif t == 'buffer' then
+        local ok, info = pcall(function()
+            local len = buffer.len(v)
+            local head = {}
+            for i = 0, math.min(len - 1, 7) do head[#head + 1] = buffer.readu8(v, i) end
+            return ('buffer(len=%d head=[%s])'):format(len, table.concat(head, ','))
+        end)
+        return ok and info or 'buffer'
     elseif t == 'function' then return 'function'
     elseif t == 'table' then
         if depth >= SPY.MaxDepth then return '{...}' end
@@ -401,6 +505,15 @@ end
 -- to apply it. Dropping that call = no fall damage. The same hook also powers
 -- the Remote Spy toggle, so we never install a second __namecall hook.
 local MenuUnloaded = false
+local lastM1Click = 0    -- set on left-click; gates the experimental packet stacker
+local stackArmed = false -- true from a click until exactly one packet is duplicated
+local stacking = false   -- re-entrancy guard so our own re-fires never re-trigger
+track(UIS.InputBegan:Connect(function(i, gpe)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 and not gpe then
+        lastM1Click = os.clock()
+        stackArmed = true
+    end
+end))
 do
     local hookmetamethod   = hookmetamethod
     local getnamecallmethod = getnamecallmethod
@@ -420,12 +533,43 @@ do
                     return
                 end
 
+                -- Attaching to a flying target can briefly drop you, making VV
+                -- fire a FallFX packet whose animation interrupts your M1.
+                -- Swallow it while Attach to back is on.
+                if method == 'FireServer' and class == 'RemoteEvent'
+                   and Toggles.AttachBack and Toggles.AttachBack.Value then
+                    local a1 = ...
+                    if type(a1) == 'table' and a1.Type == 'FallFX' then
+                        return
+                    end
+                end
+
                 -- Remote Spy: log off the hot path so inputs are never eaten
                 if Toggles.RemoteSpy and Toggles.RemoteSpy.Value
                    and (method == 'FireServer' or method == 'InvokeServer')
                    and (class == 'RemoteEvent' or class == 'RemoteFunction') then
                     local remote, args = self, table.pack(...)
                     task.spawn(function() pcall(spyLog, method, remote, args) end)
+                end
+
+                -- Experimental M1 stack: VV sends combat as buffer packets via
+                -- PacketNetworking_Remote. We can't read the buffer's intent, so
+                -- we only duplicate packets fired right after a left-click (M1).
+                -- Our re-fires are checkcaller()==true, so they skip this (no loop).
+                if not stacking and stackArmed
+                   and Toggles.StackEnabled and Toggles.StackEnabled.Value
+                   and method == 'FireServer' and class == 'RemoteEvent'
+                   and Options.StackRemote and Options.StackRemote.Value ~= ''
+                   and self.Name == Options.StackRemote.Value
+                   and (os.clock() - lastM1Click) <= Options.StackWindow.Value then
+                    stackArmed = false -- duplicate exactly ONE packet per click
+                    stacking = true    -- block re-entry from our own re-fires (no storm)
+                    local remote, args = self, table.pack(...)
+                    local extra = math.max(0, (Options.StackCount.Value or 1) - 1)
+                    for _ = 1, extra do
+                        pcall(function() remote:FireServer(table.unpack(args, 1, args.n)) end)
+                    end
+                    stacking = false
                 end
             end
             return oldNamecall(self, ...)
@@ -959,6 +1103,16 @@ local ATTACK_ANIMS = {
     ['rbxassetid://16417803802'] = true,  -- 0.93s
 }
 
+-- Stun animations on YOUR character. With No Stun on, these get cancelled so
+-- you can act through hits. Find IDs with the Animation Logger's "Log MY anims".
+local STUN_ANIMS = {
+    -- ['rbxassetid://0000000000'] = true,
+}
+
+-- Attach auto-dodge state (set by the attack detector, read by the attach loop).
+local attachTargetModel = nil
+local attachDodgeUntil = 0
+
 -- Keyframe/marker names that mean "the attack is connecting now". VV's exact
 -- names may differ - use the Animation Logger's "Log markers" to find them and
 -- add any extras here. Matching is case-insensitive (see markerIsHit).
@@ -1184,6 +1338,15 @@ local function onAnimPlayed(char, animTrack)
         end
     end
 
+    -- AI BREAKER (stop combat anims): cancel the mob's attack/parry animation
+    -- so it can't act. Only bites if VV lets us control the mob.
+    if Toggles.AIBreaker.Value and not isPlayer and not looped
+       and (Options.AIBreakMethod.Value == 'Stop combat anims' or Options.AIBreakMethod.Value == 'All')
+       and dist <= Options.AIBreakRange.Value
+       and (not Toggles.AIBreakTargetOnly.Value or char == attachTargetModel) then
+        pcall(function() animTrack:Stop(0) end)
+    end
+
     -- TRAINING: learn parry timing from your manual blocks -------------------
     if not looped and dist <= Options.ParryDistance.Value + 5
        and not (Toggles.ParryIgnorePlayers.Value and isPlayer) then
@@ -1208,6 +1371,13 @@ local function onAnimPlayed(char, animTrack)
         end
     end
 
+    -- ATTACH AUTO-DODGE: if the attach target swings, back off briefly --------
+    if Toggles.AttachBack.Value and Toggles.AttachDodge.Value
+       and attachTargetModel and char == attachTargetModel and not looped
+       and (ATTACK_ANIMS[animId] or animTrack.Length >= 0.3) then
+        attachDodgeUntil = os.clock() + Options.DodgeTime.Value
+    end
+
     -- AUTO PARRY -------------------------------------------------------------
     if not Toggles.AutoParry.Value then return end
     if looped then return end                                  -- never parry idle loops
@@ -1226,21 +1396,49 @@ local function onAnimPlayed(char, animTrack)
 
     local timing = Options.ParryTiming.Value
 
-    -- Learned: raise a block at the exact per-attack time you taught it.
+    -- Learned: parry at the per-attack time you taught it. For UNtrained attacks
+    -- fall back to a fraction of the animation length so we never just miss them.
     if timing == 'Learned (trained)' then
         local e = learnedTiming[animId]
-        if e then
-            local when = math.max(0, e.t - Options.ParryLead.Value)
-            task.delay(when, function()
-                if os.clock() - lastParry < Options.ParryCooldown.Value then return end
-                lastParry = os.clock()
-                print(('[AutoParry] trained block %s @ %.2fs'):format(animId, e.t))
-                Library:Notify(('Parry %s'):format(char.Name), 2)
-                timedBlock()
+        local when = e and math.max(0, e.t - Options.ParryLead.Value)
+            or math.max(0, animTrack.Length * Options.ParryFallback.Value - Options.ParryLead.Value)
+
+        local feinted, parryFiredAt = false, nil
+        local sc
+        sc = animTrack.Stopped:Connect(function()
+            local stoppedAt = animTrack.TimePosition
+            -- Stopped BEFORE we parried = a feint/cancel -> don't parry it.
+            if not parryFiredAt and Toggles.ReadFeints.Value then feinted = true end
+            -- AUTO-TRAIN: only learn when OUR parry just landed (the swing was
+            -- cut short soon after we blocked) - never from feints/early cancels.
+            if Toggles.AutoTrain.Value and parryFiredAt
+               and (os.clock() - parryFiredAt) < 0.35
+               and stoppedAt < (animTrack.Length - 0.10)
+               and stoppedAt >= animTrack.Length * 0.3 then
+                recordTiming(animId, stoppedAt)
+            end
+            if sc then sc:Disconnect() end
+        end)
+        task.delay(animTrack.Length + 1, function() if sc then sc:Disconnect() end end)
+
+        task.delay(when, function()
+            if feinted then return end -- attack was feinted -> skip the parry
+            if os.clock() - lastParry < Options.ParryCooldown.Value then return end
+            lastParry = os.clock()
+            parryFiredAt = os.clock()
+            print(('[AutoParry] %s block %s @ %.2fs'):format(e and 'trained' or 'fallback', animId, when))
+            timedBlock()
+        end)
+
+        -- If VV ever fires a hit marker, learn the ID so it becomes a known attack.
+        if Toggles.AutoLearn.Value then
+            local mc
+            mc = animTrack.KeyframeReached:Connect(function(kf)
+                if markerIsHit(kf) then learnAnim(animId); if mc then mc:Disconnect() end end
             end)
-            return
+            task.delay(animTrack.Length + 0.3, function() if mc then mc:Disconnect() end end)
         end
-        timing = 'On hit marker' -- untrained attack: fall back to markers
+        return
     end
 
     -- On hit marker: parry exactly when a hit keyframe fires (frame-perfect),
@@ -1271,14 +1469,31 @@ local function onAnimPlayed(char, animTrack)
     task.delay(lead, function() fireParryNow(char.Name, animName, animId, timing) end)
 end
 
+-- No Stun: cancel stun animations on YOUR character so you can act through hits.
+local function onMyAnim(animTrack)
+    local anim = animTrack.Animation
+    local id = anim and anim.AnimationId or '?'
+    if Toggles.LogMyAnims and Toggles.LogMyAnims.Value then
+        print(('[MyAnim] %s | len %.2fs | looped=%s')
+            :format(id, animTrack.Length, tostring(animTrack.Looped)))
+    end
+    if Toggles.NoStun and Toggles.NoStun.Value and STUN_ANIMS[id] then
+        pcall(function() animTrack:Stop(0) end)
+        print('[NoStun] cancelled ' .. id)
+    end
+end
+
 local animHooked = {}
 local function hookAnimator(animator)
     if animHooked[animator] then return end
     local conn = animator.AnimationPlayed:Connect(function(animTrack)
         local hum = animator.Parent
         local char = hum and hum.Parent
-        if char and char ~= getChar() and char:FindFirstChildOfClass('Humanoid') then
-            pcall(onAnimPlayed, char, animTrack)
+        if not char then return end
+        if char == getChar() then
+            pcall(onMyAnim, animTrack)                       -- local: no-stun + logging
+        elseif char:FindFirstChildOfClass('Humanoid') then
+            pcall(onAnimPlayed, char, animTrack)             -- enemies: parry/dodge
         end
     end)
     animHooked[animator] = conn
@@ -1312,6 +1527,15 @@ track(RunService.RenderStepped:Connect(function()
             hum.UseJumpPower = true
             hum.JumpPower = Options.JumpPowerValue.Value
         end
+        -- No Stun: keep us out of forced-stun physics states (PlatformStand /
+        -- ragdoll) so a hit can't lock our movement/attacks.
+        if Toggles.NoStun.Value then
+            if hum.PlatformStand then hum.PlatformStand = false end
+            local st = hum:GetState()
+            if st == Enum.HumanoidStateType.Ragdoll or st == Enum.HumanoidStateType.FallingDown then
+                pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+            end
+        end
     end
 
     -- Fly movement (camera-relative)
@@ -1329,6 +1553,150 @@ track(RunService.RenderStepped:Connect(function()
         flyGyro.CFrame = cf
         flyVel.Velocity = (dir.Magnitude > 0 and dir.Unit or Vector3.zero) * speed
     end
+end))
+
+-- ---- Attach to back ---------------------------------------------------------
+-- Teleport behind the nearest target (mob/npc/player), facing them. Distance &
+-- Y level are configurable; "Only hollows/mobs" excludes NPCs and players.
+local ATTACH_FOLDERS = { 'Living', 'Mobs', 'Enemies', 'NPCs', 'Entities', 'Monsters' }
+local attachNpcCache = setmetatable({}, { __mode = 'k' })
+local function isNpcModel(m)
+    local v = attachNpcCache[m]
+    if v == nil then v = m:FindFirstChildWhichIsA('ProximityPrompt', true) ~= nil; attachNpcCache[m] = v end
+    return v
+end
+local lockedTarget -- model we stay attached to until it dies / leaves range
+
+-- All valid attach candidates as { model, root, hum }.
+local function attachCandidates()
+    local onlyMobs = Toggles.AttachOnlyMobs.Value
+    local list = {}
+    local function add(m)
+        if m == getChar() then return end
+        local hum = m:FindFirstChildOfClass('Humanoid')
+        local root = m:FindFirstChild('HumanoidRootPart') or m.PrimaryPart
+        if hum and hum.Health > 0 and root then
+            list[#list + 1] = { model = m, root = root, hum = hum }
+        end
+    end
+    local function scan(cont)
+        for _, m in ipairs(cont:GetChildren()) do
+            if m:IsA('Model') and not Players:GetPlayerFromCharacter(m)
+               and not (onlyMobs and isNpcModel(m)) then
+                add(m)
+            end
+        end
+    end
+    local any = false
+    for _, n in ipairs(ATTACH_FOLDERS) do
+        local f = workspace:FindFirstChild(n)
+        if f then scan(f); any = true end
+    end
+    if not any then scan(workspace) end
+    if not onlyMobs then
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and p.Character then add(p.Character) end
+        end
+    end
+    return list
+end
+
+local function findAttachTarget()
+    local myRoot = getRoot()
+    if not myRoot then return nil end
+    local range = Options.AttachRange.Value
+
+    -- 1) Keep the locked target while it's still alive AND in range. This stops
+    --    it switching to whatever hollow wanders closest.
+    if lockedTarget and lockedTarget.Parent then
+        local hum = lockedTarget:FindFirstChildOfClass('Humanoid')
+        local root = lockedTarget:FindFirstChild('HumanoidRootPart') or lockedTarget.PrimaryPart
+        if hum and hum.Health > 0 and root
+           and (myRoot.Position - root.Position).Magnitude <= range then
+            return root
+        end
+        lockedTarget = nil -- dead or out of range -> release, pick the next
+    end
+
+    -- 2) Pick a new target: the LOWEST-HEALTH hollow in range (finish it, then
+    --    move to the next), tie-broken by nearest.
+    local best, bestRoot, bestHp, bestD
+    for _, c in ipairs(attachCandidates()) do
+        local d = (myRoot.Position - c.root.Position).Magnitude
+        if d <= range then
+            local hp = c.hum.Health
+            if not bestHp or hp < bestHp or (hp == bestHp and d < bestD) then
+                best, bestRoot, bestHp, bestD = c.model, c.root, hp, d
+            end
+        end
+    end
+    lockedTarget = best
+    return bestRoot
+end
+
+track(RunService.RenderStepped:Connect(function()
+    if not Toggles.AttachBack.Value then return end
+    local myRoot = getRoot()
+    local target = findAttachTarget() -- already range-gated; nil if none in range
+    if myRoot and target then
+        attachTargetModel = target.Parent -- so the dodge detector knows our target
+        -- Auto-dodge: while the target's attack is active, sit further back.
+        local dist = Options.AttachDistance.Value
+        if Toggles.AttachDodge.Value and os.clock() < attachDodgeUntil then
+            dist = dist + Options.DodgeDistance.Value
+        end
+        -- behind the target = +Z in its local space (LookVector points -Z),
+        -- then face the target so back attacks land.
+        local pos = (target.CFrame * CFrame.new(0, Options.AttachY.Value, dist)).Position
+        local goal = CFrame.new(pos, target.Position)
+        -- Tween (lerp) toward the goal instead of snapping -> smoother, far less
+        -- likely to trip the teleport anti-cheat that was kicking you.
+        myRoot.CFrame = myRoot.CFrame:Lerp(goal, math.clamp(Options.AttachSpeed.Value, 0, 1))
+        -- Stop us entering freefall (which plays the fall anim / fires FallFX and
+        -- interrupts your M1): kill downward momentum + force a grounded state.
+        myRoot.AssemblyLinearVelocity = Vector3.zero
+        local hum = getHumanoid()
+        if hum and hum:GetState() == Enum.HumanoidStateType.Freefall then
+            pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
+        end
+    end
+end))
+
+-- ---- AI breaker: freeze / ragdoll nearby mobs -------------------------------
+-- Works only on mobs the server lets the client own (network ownership).
+track(RunService.Heartbeat:Connect(function()
+    if not Toggles.AIBreaker.Value then return end
+    local method = Options.AIBreakMethod.Value
+    local doFreeze  = method == 'Freeze + slow' or method == 'All'
+    local doRagdoll = method == 'Ragdoll (physics)' or method == 'All'
+    if not (doFreeze or doRagdoll) then return end
+    local myRoot = getRoot(); if not myRoot then return end
+    local range = Options.AIBreakRange.Value
+    local targetOnly = Toggles.AIBreakTargetOnly.Value
+
+    local function affect(m)
+        if m == getChar() or Players:GetPlayerFromCharacter(m) or isNpcModel(m) then return end
+        if targetOnly and m ~= attachTargetModel then return end
+        local hum = m:FindFirstChildOfClass('Humanoid')
+        local root = m:FindFirstChild('HumanoidRootPart') or m.PrimaryPart
+        if not (hum and root and hum.Health > 0) then return end
+        if (myRoot.Position - root.Position).Magnitude > range then return end
+        if doFreeze then
+            root.AssemblyLinearVelocity = Vector3.zero
+            pcall(function() hum.WalkSpeed = 0; hum.JumpPower = 0 end)
+        end
+        if doRagdoll then
+            pcall(function() hum:ChangeState(Enum.HumanoidStateType.Physics) end)
+        end
+    end
+    local function scan(cont)
+        for _, m in ipairs(cont:GetChildren()) do if m:IsA('Model') then affect(m) end end
+    end
+    local any = false
+    for _, n in ipairs(ATTACH_FOLDERS) do
+        local f = workspace:FindFirstChild(n); if f then scan(f); any = true end
+    end
+    if not any then scan(workspace) end
 end))
 
 -- ---- Noclip (Stepped so CanCollide sticks) ----------------------------------
